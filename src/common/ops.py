@@ -16,24 +16,32 @@ import torch.nn as nn
 
 EPSILON = float(np.finfo(float).eps)
 HUGE_INT = 1e31
+# CPU version
+device_cpu = torch.device('cpu')
 
 
-def merge_padded_seq_3D(hiddens1, masks1, hidden2, masks2):
+def merge_padded_seq_3D(hiddens1, masks1, hidden2, masks2, device_cpu_flag=False):
     batch_size = len(hiddens1)
     seq_len1 = masks1.size(1) - masks1.sum(dim=1)
     seq_len2 = masks2.size(1) - masks2.sum(dim=1)
     merged_size = seq_len1 + seq_len2
     max_merged_size = int(merged_size.max())
     res1 = max_merged_size - hiddens1.size(1)
-    merged_hiddens = torch.cat([hiddens1, zeros_var_cuda([batch_size, res1, hiddens1.size(2)])], dim=1)
-    scatter_index2 = seq_len1.unsqueeze(1) + batch_arange_cuda(batch_size, hidden2.size(1))
+    if device_cpu_flag:
+        merged_hiddens = torch.cat([hiddens1, zeros_var_cpu([batch_size, res1, hiddens1.size(2)])], dim=1)
+        scatter_index2 = seq_len1.unsqueeze(1) + batch_arange_cpu(batch_size, hidden2.size(1))
+    else:
+        merged_hiddens = torch.cat([hiddens1, zeros_var_cuda([batch_size, res1, hiddens1.size(2)])], dim=1)
+        scatter_index2 = seq_len1.unsqueeze(1) + batch_arange_cuda(batch_size, hidden2.size(1))
     scatter_index_masks2 = (scatter_index2 < max_merged_size)
     scatter_index2 *= scatter_index_masks2.long()
     merged_hiddens.scatter_add_(index=scatter_index2.unsqueeze(2).expand_as(hidden2),
                                 src=hidden2 * scatter_index_masks2.unsqueeze(2).float(), dim=1)
-    merged_hidden_masks = batch_arange_cuda(batch_size, max_merged_size) >= merged_size.unsqueeze(1)
+    if device_cpu_flag:
+        merged_hidden_masks = batch_arange_cpu(batch_size, max_merged_size) >= merged_size.unsqueeze(1)
+    else :
+        merged_hidden_masks = batch_arange_cuda(batch_size, max_merged_size) >= merged_size.unsqueeze(1)
     return merged_hiddens, merged_hidden_masks
-
 
 def batch_lookup(M, idx, vector_output=True):
     """
@@ -54,7 +62,7 @@ def batch_lookup(M, idx, vector_output=True):
     return samples
 
 
-def batch_lookup_3D(M, idx):
+def batch_lookup_3D(M, idx, device_cpu_flag=False):
     """
     Perform batch look up on a 3D tensor M using indices idx.
     :param M: [batch_size, seq_len, dim] Each row of M is an independent feature set.
@@ -64,15 +72,17 @@ def batch_lookup_3D(M, idx):
     batch_size, seq_len, dim = M.size()
     _, sample_size = idx.size()
     M = M.view(batch_size*seq_len, dim)
-    offset = long_var_cuda(torch.arange(batch_size).unsqueeze(1))
+    if device_cpu_flag:
+        offset = long_var_cpu(torch.arange(batch_size).unsqueeze(1))
+    else :
+        offset = long_var_cuda(torch.arange(batch_size).unsqueeze(1))
     idx = idx + offset * seq_len
     idx = idx.view(-1)
     # [batch_size*sample_size, dim]
     features = torch.index_select(M, 0, idx)
     return features.view(batch_size, sample_size, dim)
 
-
-def batch_binary_lookup(M, b_idx, pad_value):
+def batch_binary_lookup(M, b_idx, pad_value, device_cpu_flag=False):
     """
     Perform batch look up on a 2D tensor M using a binary mask.
     :param M: [batch_size, seq_len]
@@ -82,17 +92,24 @@ def batch_binary_lookup(M, b_idx, pad_value):
     batch_size = M.size(0)
     seq_len = b_idx.sum(1, keepdim=True)
     max_seq_len = int(seq_len.max())
-    output_masks = batch_arange_cuda(batch_size, max_seq_len) >= seq_len
-    pad_len = max_seq_len - seq_len
-    max_pad_len = int(pad_len.max())
-    M = torch.cat([M, fill_var_cuda([batch_size, max_pad_len], pad_value, dtype=M.dtype)], dim=1)
-    pad_b_idx = batch_arange_cuda(batch_size, max_pad_len) < pad_len
+    if device_cpu_flag:
+        output_masks = batch_arange_cpu(batch_size, max_seq_len) >= seq_len
+        pad_len = max_seq_len - seq_len
+        max_pad_len = int(pad_len.max())
+        M = torch.cat([M, fill_var_cpu([batch_size, max_pad_len], pad_value, dtype=M.dtype)], dim=1)
+        pad_b_idx = batch_arange_cpu(batch_size, max_pad_len) < pad_len
+    else :
+        output_masks = batch_arange_cuda(batch_size, max_seq_len) >= seq_len
+        pad_len = max_seq_len - seq_len
+        max_pad_len = int(pad_len.max())
+        M = torch.cat([M, fill_var_cuda([batch_size, max_pad_len], pad_value, dtype=M.dtype)], dim=1)
+        pad_b_idx = batch_arange_cuda(batch_size, max_pad_len) < pad_len
     b_idx = torch.cat([b_idx, pad_b_idx], dim=1)
     output = M[b_idx].view(batch_size, max_seq_len)
     return output, output_masks
 
 
-def batch_binary_lookup_3D(M, b_idx, pad_value):
+def batch_binary_lookup_3D(M, b_idx, pad_value, device_cpu_flag=False):
     """
     Perform batch look up on a 3D tensor M using a binary mask.
     :param M: [batch_size, seq_len, dim] Each row of M is an independent feature set.
@@ -104,17 +121,24 @@ def batch_binary_lookup_3D(M, b_idx, pad_value):
     hidden_dim = M.size(2)
     seq_len = b_idx.sum(1, keepdim=True)
     max_seq_len = int(seq_len.max())
-    output_masks = batch_arange_cuda(batch_size, max_seq_len) >= seq_len
-    pad_len = max_seq_len - seq_len
-    max_pad_len = int(pad_len.max())
-    M = torch.cat([M, fill_var_cuda([batch_size, max_pad_len, hidden_dim], pad_value, dtype=M.dtype)], dim=1)
-    pad_b_idx = batch_arange_cuda(batch_size, max_pad_len) < pad_len
+    if device_cpu_flag:
+        output_masks = batch_arange_cpu(batch_size, max_seq_len) >= seq_len
+        pad_len = max_seq_len - seq_len
+        max_pad_len = int(pad_len.max())
+        M = torch.cat([M, fill_var_cpu([batch_size, max_pad_len, hidden_dim], pad_value, dtype=M.dtype)], dim=1)
+        pad_b_idx = batch_arange_cpu(batch_size, max_pad_len) < pad_len
+    else :
+        output_masks = batch_arange_cuda(batch_size, max_seq_len) >= seq_len
+        pad_len = max_seq_len - seq_len
+        max_pad_len = int(pad_len.max())
+        M = torch.cat([M, fill_var_cuda([batch_size, max_pad_len, hidden_dim], pad_value, dtype=M.dtype)], dim=1)
+        pad_b_idx = batch_arange_cuda(batch_size, max_pad_len) < pad_len
     b_idx = torch.cat([b_idx, pad_b_idx], dim=1)
     output = M[b_idx].view(batch_size, max_seq_len, hidden_dim)
     return output, output_masks
 
 
-def soft_embedding_lookup(embeddings, prob):
+def soft_embedding_lookup(embeddings, prob, device_cpu_flag=False):
     """
     Warning: only apply on embeddings of small size. Otherwise this operation will be very costly.
     """
@@ -123,7 +147,10 @@ def soft_embedding_lookup(embeddings, prob):
         assert(prob.size(1) == 1)
         prob = prob.squeeze(1)
     vocab_size = prob.size(-1)
-    indices = arange_cuda(vocab_size)
+    if device_cpu_flag:
+        indices = arange_cpu(vocab_size)
+    else :
+        indices = arange_cuda(vocab_size)
     embedded = embeddings(indices)
     soft_embedded = torch.matmul(prob, embedded)
     if input_dim == 3:
@@ -176,18 +203,29 @@ def unpack_bidirectional_lstm_state(state, num_directions=2):
     return torch.stack(torch.split(state, new_hidden_dim, dim=2), dim=1).view(-1, batch_size, new_hidden_dim)
 
 
-def pad_and_cat(a, padding_value, padding_dim=1, dtype=torch.long, fill_empty_batch=True, return_masks=False):
+def pad_and_cat(a, padding_value, padding_dim=1, dtype=torch.long, fill_empty_batch=True, return_masks=False, device_cpu_flag = False ):
 
     def vectorize(a):
-        if dtype == torch.uint8:
-            a = [byte_var_cuda(x) for x in a]
-        elif dtype == torch.int:
-            a = [int_var_cuda(x) for x in a]
-        elif dtype == torch.long:
-            a = [long_var_cuda(x) for x in a]
-        else:
-            a = [var_cuda(x) for x in a]
-        return a
+        if device_cpu_flag:
+            if dtype == torch.uint8:
+                a = [byte_var_cpu(x) for x in a]
+            elif dtype == torch.int:
+                a = [int_var_cpu(x) for x in a]
+            elif dtype == torch.long:
+                a = [long_var_cpu(x) for x in a]
+            else:
+                a = [var_cpu(x) for x in a]
+            return a
+        else :
+            if dtype == torch.uint8:
+                a = [byte_var_cuda(x) for x in a]
+            elif dtype == torch.int:
+                a = [int_var_cuda(x) for x in a]
+            elif dtype == torch.long:
+                a = [long_var_cuda(x) for x in a]
+            else:
+                a = [var_cuda(x) for x in a]
+            return a
 
     if not list(itertools.chain(*a)):
         # "a" contains only empty vectors
@@ -202,7 +240,10 @@ def pad_and_cat(a, padding_value, padding_dim=1, dtype=torch.long, fill_empty_ba
     max_dim_size = max([x.size()[padding_dim] for x in a])
 
     if return_masks:
-        masks = byte_ones_var_cuda([len(a), max_dim_size])
+        if device_cpu_flag:
+            masks = byte_ones_var_cpu([len(a), max_dim_size])
+        else :
+            masks = byte_ones_var_cuda([len(a), max_dim_size])
     padded_a = []
     for i, x in enumerate(a):
         if return_masks:
@@ -219,14 +260,15 @@ def pad_and_cat(a, padding_value, padding_dim=1, dtype=torch.long, fill_empty_ba
         else:
             padded_a.append(x)
     padded_a = torch.cat(padded_a, dim=0)
-
+    if device_cpu_flag :
+        padded_a = padded_a.cpu()
     if return_masks:
         return padded_a, masks
     else:
         return padded_a
 
 
-def pad_and_cat_2d(a, padding_value, padding_dim=2, dtype=torch.long, list_padding_value=None, fill_empty_batch=True):
+def pad_and_cat_2d(a, padding_value, padding_dim=2, dtype=torch.long, list_padding_value=None, fill_empty_batch=True, device_cpu_flag = False):
     if not list(itertools.chain(*a)):
         # "a" contains only empty vectors
         if fill_empty_batch:
@@ -244,22 +286,33 @@ def pad_and_cat_2d(a, padding_value, padding_dim=2, dtype=torch.long, list_paddi
         else:
             padded_a.append(l)
     flat_a = [x for l in padded_a for x in l]
-    padded_flat_a = pad_and_cat(flat_a, padding_value, padding_dim=(padding_dim-1), dtype=dtype)
+    padded_flat_a = pad_and_cat(flat_a, padding_value, padding_dim=(padding_dim-1), dtype=dtype, device_cpu_flag=device_cpu_flag)
     return padded_flat_a.view(batch_size, w, -1)
 
 
-def pad_and_cat_matrices(a, padd_value, dtype=torch.long):
+def pad_and_cat_matrices(a, padd_value, dtype=torch.long, device_cpu_flag=True):
 
     def vectorize(a):
-        if dtype == torch.uint8:
-            a = [byte_var_cuda(x) for x in a]
-        elif dtype == torch.int:
-            a = [int_var_cuda(x) for x in a]
-        elif dtype == torch.long:
-            a = [long_var_cuda(x) for x in a]
-        else:
-            a = [var_cuda(x) for x in a]
-        return a
+        if device_cpu_flag:
+            if dtype == torch.uint8:
+                a = [byte_var_cpu(x) for x in a]
+            elif dtype == torch.int:
+                a = [int_var_cpu(x) for x in a]
+            elif dtype == torch.long:
+                a = [long_var_cpu(x) for x in a]
+            else:
+                a = [var_cpu(x) for x in a]
+            return a
+        else :
+            if dtype == torch.uint8:
+                a = [byte_var_cuda(x) for x in a]
+            elif dtype == torch.int:
+                a = [int_var_cuda(x) for x in a]
+            elif dtype == torch.long:
+                a = [long_var_cuda(x) for x in a]
+            else:
+                a = [var_cuda(x) for x in a]
+            return a
 
     if type(a[0]) is list or type(a[0]) is np.ndarray:
         a = vectorize(a)
@@ -289,27 +342,42 @@ def pad_1d_left(x, padding_size, pad_id):
     return pad(x)
 
 
-def right_shift_pad(x, pad_id):
+def right_shift_pad(x, pad_id, device_cpu_flag=False):
     if x.size(1) == 1:
-        return int_fill_var_cuda(x.size(), pad_id)
+        if device_cpu_flag :
+            return int_fill_var_cpu(x.size(), pad_id)
+        else:
+            return int_fill_var_cuda(x.size(), pad_id)
     return pad_1d_left(x[:, :-1], 1, pad_id)
 
 
-def left_shift_pad(x, pad_id):
+def left_shift_pad(x, pad_id, device_cpu_flag=False):
     if x.size(1) == 1:
-        return int_fill_var_cuda(x.size(), pad_id)
+        if device_cpu_flag :
+            return int_fill_var_cpu(x.size(), pad_id)
+        else :
+            return int_fill_var_cuda(x.size(), pad_id)
     return pad_1d_right(x[:, 1:], 1, pad_id)
 
 
-def pad_batch(batch_seq_ids, pad_id, dtype=torch.long):
-    padded_seq = pad_and_cat(batch_seq_ids, pad_id, dtype=dtype)
-    pad_mask = (padded_seq == pad_id)
+def pad_batch(batch_seq_ids, pad_id, dtype=torch.long, device_cpu_flag=False):
+    if device_cpu_flag:
+        padded_seq = pad_and_cat(batch_seq_ids, pad_id, dtype=dtype, device_cpu_flag=device_cpu)
+        pad_mask = (padded_seq == pad_id)
+        pad_mask.cpu()
+    else :
+        padded_seq = pad_and_cat(batch_seq_ids, pad_id, dtype=dtype)
+        pad_mask = (padded_seq == pad_id)
     return padded_seq, pad_mask
 
-
-def pad_batch_2D(batch_2D_seq_ids, pad_id, dtype=torch.long, output_2d_tensor=False):
-    padded_2D_seq = pad_and_cat_2d(batch_2D_seq_ids, pad_id, dtype=dtype)
-    pad_mask = (padded_2D_seq == pad_id)
+def pad_batch_2D(batch_2D_seq_ids, pad_id, dtype=torch.long, output_2d_tensor=False, device_cpu_flag=False):
+    if device_cpu_flag:
+        padded_2D_seq = pad_and_cat_2d(batch_2D_seq_ids, pad_id, dtype=dtype, device_cpu_flag=device_cpu_flag)
+        pad_mask = (padded_2D_seq == pad_id)
+        pad_mask.cpu()
+    else :
+        padded_2D_seq = pad_and_cat_2d(batch_2D_seq_ids, pad_id, dtype=dtype)
+        pad_mask = (padded_2D_seq == pad_id)
     if output_2d_tensor:
         batch_size = padded_2D_seq.size(0)
         padded_2D_seq = padded_2D_seq.view(batch_size, -1)
@@ -317,9 +385,12 @@ def pad_batch_2D(batch_2D_seq_ids, pad_id, dtype=torch.long, output_2d_tensor=Fa
     return padded_2D_seq, pad_mask
 
 
-def tile_along_beam(x, beam_size, dim=0):
+def tile_along_beam(x, beam_size, dim=0, device_cpu_flag=False):
     bs = x.size(dim)
-    tile_indices = arange_cuda(bs).view(bs, 1).repeat(1, beam_size).view(bs*beam_size)
+    if device_cpu_flag:
+        tile_indices = arange_cpu(bs).view(bs, 1).repeat(1, beam_size).view(bs*beam_size)
+    else:
+        tile_indices = arange_cuda(bs).view(bs, 1).repeat(1, beam_size).view(bs*beam_size)
     return torch.index_select(x, dim, tile_indices)
     # batch_size = len(x)
     # full_size = batch_size * beam_size
@@ -359,47 +430,83 @@ def positional_encodings_like(x, t=None):
 def arange_cuda(x, dtype=torch.long):
     return torch.arange(x, dtype=dtype).cuda()
 
+# CPU 버전 추가
+def arange_cpu(x, dtype=torch.long):
+    return torch.arange(x, dtype=dtype, device = device_cpu)
 
 def batch_arange_cuda(batch_size, x, dtype=torch.long):
     return zeros_var_cuda(batch_size, dtype=dtype).unsqueeze(1) + \
            arange_cuda(x, dtype=dtype).unsqueeze(0)
 
+# CPU 버전 추가
+def batch_arange_cpu(batch_size, x, dtype=torch.long):
+    return zeros_var_cpu(batch_size, dtype=dtype).unsqueeze(1) + \
+           arange_cpu(x, dtype=dtype).unsqueeze(0)
 
 def byte_ones_var_cuda(s, requires_grad=False):
     return torch.ones(s, dtype=torch.uint8, requires_grad=requires_grad).cuda()
 
+# CPU 버전 추가
+def byte_ones_var_cpu(s, requires_grad=False):
+    return torch.ones(s, dtype=torch.uint8, requires_grad=requires_grad, device = device_cpu)
 
 def ones_var_cuda(s, requires_grad=False, dtype=torch.float32):
     return torch.ones(s, requires_grad=requires_grad, dtype=dtype).cuda()
 
+# CPU 버전 추가
+def ones_var_cpu(s, requires_grad=False, dtype=torch.float32):
+    return torch.ones(s, requires_grad=requires_grad, dtype=dtype, device = device_cpu)
 
 def int_ones_var_cuda(s, requires_grad=False):
     return torch.ones(s, dtype=torch.long, requires_grad=requires_grad).cuda()
 
+# CPU 버전 추가
+def int_ones_var_cpu(s, requires_grad=False):
+    return torch.ones(s, dtype=torch.long, requires_grad=requires_grad, device = device_cpu)
 
 def zeros_like_cuda(x, requires_grad=False, dtype=torch.float32):
     return torch.zeros_like(x, requires_grad=requires_grad, dtype=dtype).cuda()
 
+# CPU 버전 추가
+def zeros_like_cpu(x, requires_grad=False, dtype=torch.float32):
+    return torch.zeros_like(x, requires_grad=requires_grad, dtype=dtype, device = device_cpu)
 
 def byte_zeros_var_cuda(s, requires_grad=False):
     return torch.zeros(s, dtype=torch.uint8, requires_grad=requires_grad).cuda()
 
+# CPU 버전 추가
+def byte_zeros_var_cpu(s, requires_grad=False):
+    return torch.zeros(s, dtype=torch.uint8, requires_grad=requires_grad, device = device_cpu)
 
 def zeros_var_cuda(s, requires_grad=False, dtype=torch.float32):
     return torch.zeros(s, requires_grad=requires_grad, dtype=dtype).cuda()
 
+# CPU 버전 추가
+def zeros_var_cpu(s, requires_grad=False, dtype=torch.float32):
+    return torch.zeros(s, requires_grad=requires_grad, dtype=dtype, device = device_cpu)
 
 def int_zeros_var_cuda(s, requires_grad=False):
     return torch.zeros(s, dtype=torch.long, requires_grad=requires_grad).cuda()
 
+# CPU 버전 추가
+def int_zeros_var_cpu(s, requires_grad=False):
+    return torch.zeros(s, dtype=torch.long, requires_grad=requires_grad, device = device_cpu)
 
 def int_fill_var_cuda(s, value, requires_grad=False):
     return torch.zeros(s, dtype=torch.long, requires_grad=requires_grad).cuda() + value
 
+# CPU 버전 추가
+def int_fill_var_cpu(s, value, requires_grad=False):
+    sTensor =  torch.zeros(s, dtype=torch.long, requires_grad=requires_grad) + value
+    return sTensor.cpu()
 
 def fill_var_cuda(s, value, dtype=None, requires_grad=False):
     return torch.zeros(s, dtype=dtype, requires_grad=requires_grad).cuda() + value
 
+# CPU 버전 추가
+def fill_var_cpu(s, value, dtype=None, requires_grad=False):
+    sTensor = torch.zeros(s, dtype=dtype, requires_grad=requires_grad) + value
+    return sTensor.cpu()
 
 def byte_var_cuda(x, requires_grad=False):
     tx = torch.ByteTensor(x).cuda()
@@ -407,6 +514,12 @@ def byte_var_cuda(x, requires_grad=False):
         tx.requires_grad_()
     return tx
 
+# CPU 버전 추가
+def byte_var_cpu(x, requires_grad=False):
+    tx = torch.ByteTensor(x, device = device_cpu)
+    if requires_grad:
+        tx.requires_grad_()
+    return tx
 
 def int_var_cuda(x, requires_grad=False):
     tx = torch.IntTensor(x).cuda()
@@ -414,6 +527,12 @@ def int_var_cuda(x, requires_grad=False):
         tx.requires_grad_()
     return tx
 
+# CPU 버전 추가
+def int_var_cpu(x, requires_grad=False):
+    tx = torch.IntTensor(x, device = device_cpu)
+    if requires_grad:
+        tx.requires_grad_()
+    return tx
 
 def long_var_cuda(x, requires_grad=False):
     tx = torch.LongTensor(x).cuda()
@@ -421,6 +540,12 @@ def long_var_cuda(x, requires_grad=False):
         tx.requires_grad_()
     return tx
 
+# CPU 버전 추가
+def long_var_cpu(x, requires_grad=False):
+    tx = torch.LongTensor(x, device = device_cpu)
+    if requires_grad:
+        tx.requires_grad_()
+    return tx
 
 def var_cuda(x, requires_grad=False):
     tx = torch.Tensor(x).cuda()
@@ -435,6 +560,12 @@ def var(x, requires_grad=False):
         tx.requires_grad_()
     return tx
 
+# CPU 버전 추가
+def var_cpu(x, requires_grad=False):
+    tx = torch.Tensor(x, device = device_cpu)
+    if requires_grad:
+        tx.requires_grad_()
+    return tx
 
 def var_to_numpy(x):
     if type(x) is list:

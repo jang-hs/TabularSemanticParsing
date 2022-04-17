@@ -8,7 +8,7 @@
 
  Encoder-decoder learning framework.
 """
-
+import gc
 import random
 from tqdm import tqdm
 
@@ -102,7 +102,7 @@ class EncoderDecoderLFramework(LFramework):
         loss /= self.num_accumulation_steps
         return loss
 
-    def forward(self, formatted_batch, model_ensemble=None):
+    def forward(self, formatted_batch, model_ensemble=None, device_cpu_flag = None):
         encoder_input_ids = formatted_batch[0]
         decoder_input_ids = formatted_batch[1][0] if self.training else None
         if self.model_id in [SEQ2SEQ_PG, BRIDGE]:
@@ -138,7 +138,7 @@ class EncoderDecoderLFramework(LFramework):
         return outputs
 
     def inference(self, examples, decode_str_output=True, restore_clause_order=False, pred_restored_cache=None,
-                  check_schema_consistency_=True, engine=None, inline_eval=False, model_ensemble=None, verbose=False):
+                  check_schema_consistency_=True, engine=None, inline_eval=False, model_ensemble=None, verbose=False, device_cpu_flag = None):
         # sanity check
         if self.args.leaderboard_submission or self.args.demo:
             assert (not verbose and not inline_eval and not self.args.use_oracle_tables)
@@ -153,7 +153,7 @@ class EncoderDecoderLFramework(LFramework):
         num_error_cases = 0
         for batch_start_id in tqdm(range(0, len(examples), self.dev_batch_size)):
             mini_batch = examples[batch_start_id:batch_start_id + self.dev_batch_size]
-            formatted_batch = self.format_batch(mini_batch)
+            formatted_batch = self.format_batch(mini_batch, device_cpu_flag)
             outputs = self.forward(formatted_batch, model_ensemble)
             if self.model_id in [SEQ2SEQ_PG, BRIDGE]:
                 preds, pred_scores, text_p_pointers, text_ptr_weights, seq_len = outputs
@@ -300,7 +300,7 @@ class EncoderDecoderLFramework(LFramework):
 
         return out_dict
 
-    def format_batch(self, mini_batch):
+    def format_batch(self, mini_batch, device_cpu_flag = False):
 
         def get_decoder_input_ids():
             if self.training:
@@ -308,7 +308,7 @@ class EncoderDecoderLFramework(LFramework):
                     X = [exp.program_singleton_field_input_ids for exp in mini_batch]
                 else:
                     X = [exp.program_input_ids for exp in mini_batch]
-                return ops.pad_batch(X, self.mdl.out_vocab.pad_id)
+                return ops.pad_batch(X, self.mdl.out_vocab.pad_id, device_cpu_flag)
             else:
                 return None
 
@@ -334,7 +334,9 @@ class EncoderDecoderLFramework(LFramework):
             return encoder_attn_mask
 
         super().format_batch(mini_batch)
-        encoder_input_ids = ops.pad_batch([exp.text_ids for exp in mini_batch], self.mdl.in_vocab.pad_id)
+        
+        encoder_input_ids = ops.pad_batch([exp.text_ids for exp in mini_batch], self.mdl.in_vocab.pad_id ,device_cpu_flag=device_cpu_flag)
+        
         decoder_input_ids = get_decoder_input_ids()
 
         table_samples = []
@@ -448,22 +450,22 @@ class EncoderDecoderLFramework(LFramework):
                     if self.args.read_picklist:
                         transformer_output_value_masks.append(exp.transformer_output_value_mask)
 
-            encoder_ptr_input_ids = ops.pad_batch(encoder_ptr_input_ids, self.mdl.in_vocab.pad_id)
-            encoder_ptr_value_ids = ops.pad_batch(encoder_ptr_value_ids, self.mdl.in_vocab.pad_id)
-            schema_memory_masks = ops.pad_batch(schema_memory_masks, pad_id=0) \
+            encoder_ptr_input_ids = ops.pad_batch(encoder_ptr_input_ids, self.mdl.in_vocab.pad_id,device_cpu_flag=device_cpu_flag)
+            encoder_ptr_value_ids = ops.pad_batch(encoder_ptr_value_ids, self.mdl.in_vocab.pad_id,device_cpu_flag=device_cpu_flag)
+            schema_memory_masks = ops.pad_batch(schema_memory_masks, pad_id=0,device_cpu_flag=device_cpu_flag) \
                 if (self.args.use_pred_tables and not self.training) else (None, None)
-            decoder_ptr_value_ids = ops.pad_batch(decoder_ptr_value_ids, self.mdl.out_vocab.pad_id) \
+            decoder_ptr_value_ids = ops.pad_batch(decoder_ptr_value_ids, self.mdl.out_vocab.pad_id,device_cpu_flag=device_cpu_flag) \
                 if self.training else None
-            primary_key_ids = ops.pad_batch(primary_key_ids, self.mdl.in_vocab.pad_id)
-            foreign_key_ids = ops.pad_batch(foreign_key_ids, self.mdl.in_vocab.pad_id)
-            field_type_ids = ops.pad_batch(field_type_ids, self.mdl.in_vocab.pad_id)
-            table_masks = ops.pad_batch(table_masks, pad_id=0)
-            transformer_output_value_masks = ops.pad_batch(transformer_output_value_masks, pad_id=0, dtype=torch.uint8) \
+            primary_key_ids = ops.pad_batch(primary_key_ids, self.mdl.in_vocab.pad_id,device_cpu_flag=device_cpu_flag)
+            foreign_key_ids = ops.pad_batch(foreign_key_ids, self.mdl.in_vocab.pad_id,device_cpu_flag=device_cpu_flag)
+            field_type_ids = ops.pad_batch(field_type_ids, self.mdl.in_vocab.pad_id,device_cpu_flag=device_cpu_flag)
+            table_masks = ops.pad_batch(table_masks, pad_id=0,device_cpu_flag=device_cpu_flag)
+            transformer_output_value_masks = ops.pad_batch(transformer_output_value_masks, pad_id=0, dtype=torch.uint8,device_cpu_flag=device_cpu_flag) \
                 if self.args.read_picklist else (None, None)
             if not self.training:
-                table_positions = ops.pad_batch(table_positions, pad_id=-1) \
+                table_positions = ops.pad_batch(table_positions, pad_id=-1,device_cpu_flag=device_cpu_flag) \
                     if self.args.process_sql_in_execution_order else (None, None)
-                table_field_scopes = ops.pad_batch_2D(table_field_scopes, pad_id=0) \
+                table_field_scopes = ops.pad_batch_2D(table_field_scopes, pad_id=0,device_cpu_flag=device_cpu_flag) \
                     if self.args.process_sql_in_execution_order else (None, None)
             graphs = None
             return encoder_input_ids, decoder_input_ids, encoder_ptr_input_ids, encoder_ptr_value_ids, \
@@ -474,9 +476,9 @@ class EncoderDecoderLFramework(LFramework):
             encoder_ptr_input_ids = [exp.ptr_input_ids for exp in mini_batch]
             encoder_ptr_value_ids = [exp.ptr_value_ids for exp in mini_batch]
             decoder_ptr_value_ids = [exp.program_text_ptr_value_ids for exp in mini_batch]
-            encoder_ptr_input_ids = ops.pad_batch(encoder_ptr_input_ids, self.mdl.in_vocab.pad_id)
-            encoder_ptr_value_ids = ops.pad_batch(encoder_ptr_value_ids, self.mdl.in_vocab.pad_id)
-            decoder_ptr_value_ids = ops.pad_batch(decoder_ptr_value_ids, self.mdl.out_vocab.pad_id)
+            encoder_ptr_input_ids = ops.pad_batch(encoder_ptr_input_ids, self.mdl.in_vocab.pad_id,device_cpu_flag=device_cpu_flag)
+            encoder_ptr_value_ids = ops.pad_batch(encoder_ptr_value_ids, self.mdl.in_vocab.pad_id,device_cpu_flag=device_cpu_flag)
+            decoder_ptr_value_ids = ops.pad_batch(decoder_ptr_value_ids, self.mdl.out_vocab.pad_id,device_cpu_flag=device_cpu_flag)
             return encoder_input_ids, decoder_input_ids, encoder_ptr_input_ids, encoder_ptr_value_ids, \
                    decoder_ptr_value_ids
         else:

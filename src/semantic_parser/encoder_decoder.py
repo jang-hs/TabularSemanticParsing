@@ -47,6 +47,11 @@ class EncoderDecoder(nn.Module):
         self.encoder = None
         self.decoder = None
 
+        # cpu 사용 여부 추가
+        self.device_cpu_flag = True if not args.gpu else False
+        if self.device_cpu_flag:
+            torch.device('cpu')
+
     def define_embeddings(self):
         if self.pretrained_transformer != 'null':
             print('pretrained_transformer = {}'.format(self.pretrained_transformer))
@@ -69,10 +74,16 @@ class EncoderDecoder(nn.Module):
 
     def get_segment_and_position_ids(self, encoder_input_ids):
         batch_size, input_size = encoder_input_ids.size()
-        position_ids = ops.arange_cuda(input_size).unsqueeze(0).expand_as(encoder_input_ids)
-        # [CLS] w1 w2 ... [SEP] * [T] ...
-        # 0     0  0  ...  0  1 1 ...
-        seg1_end_pos = torch.nonzero(encoder_input_ids == self.tu.sep_id)[:, 1].view(batch_size, 2)[:, 0]
+        if self.device_cpu_flag:
+            position_ids = ops.arange_cpu(input_size).unsqueeze(0).expand_as(encoder_input_ids)
+            # [CLS] w1 w2 ... [SEP] * [T] ...
+            # 0     0  0  ...  0  1 1 ...
+            seg1_end_pos = torch.nonzero(encoder_input_ids == self.tu.sep_id)[:, 1].view(batch_size, 2)[:, 0]
+        else:
+            position_ids = ops.arange_cuda(input_size).unsqueeze(0).expand_as(encoder_input_ids)
+            # [CLS] w1 w2 ... [SEP] * [T] ...
+            # 0     0  0  ...  0  1 1 ...
+            seg1_end_pos = torch.nonzero(encoder_input_ids == self.tu.sep_id)[:, 1].view(batch_size, 2)[:, 0]
         segment_ids = (position_ids > seg1_end_pos.unsqueeze(1)).long()
         # position_ids = position_ids * (1 - segment_ids)
         # position_ids = position_ids * (1 - segment_ids) + (seg1_end_pos + 1).unsqueeze(1) * segment_ids

@@ -12,7 +12,7 @@ import numpy as np
 import os
 import random
 from tqdm import tqdm
-import wandb
+# import wandb
 
 import torch
 import torch.nn as nn
@@ -28,11 +28,14 @@ from src.trans_checker.args import args
 from src.utils.trans import bert_utils as bu
 import src.utils.utils as utils
 
-torch.cuda.set_device('cuda:{}'.format(args.gpu))
-torch.manual_seed(args.seed)
-torch.cuda.manual_seed_all(args.seed)
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    torch.cuda.set_device('cuda:{}'.format(args.gpu))
+    torch.cuda.manual_seed_all(args.seed)
+torch.manual_seed(args.seed)
+
 
 
 class SpanExtractor(nn.Module):
@@ -41,6 +44,7 @@ class SpanExtractor(nn.Module):
         self.start_pred = Linear(input_dim, 1)
         self.end_pred = Linear(input_dim, 1)
         self.log_softmax = nn.LogSoftmax(dim=-1)
+        
 
     def forward(self, encoder_hiddens, text_masks):
         """
@@ -65,6 +69,10 @@ class TranslatabilityChecker(nn.Module):
         self.encoder_hidden_dim = args.encoder_hidden_dim if args.encoder_hidden_dim > 0 else args.encoder_input_dim
         self.translatability_pred = nn.Sequential(nn.Linear(self.encoder_hidden_dim, 1), nn.Sigmoid())
         self.span_extractor = SpanExtractor(self.encoder_hidden_dim)
+        self.device_cpu_flag = True if not args.gpu else False
+        if self.device_cpu_flag:
+            torch.device('cpu')
+
 
     def forward(self, input_ids, text_masks):
         inputs, input_masks = input_ids
@@ -72,7 +80,10 @@ class TranslatabilityChecker(nn.Module):
         segment_ids, position_ids = self.get_segment_and_position_ids(inputs)
         inputs_embedded, _ = self.transformer_encoder(inputs, input_masks,
                                                       segments=segment_ids, position_ids=position_ids)
-        text_masks = torch.cat([ops.zeros_var_cuda([batch_size, 1]), text_masks.float()], dim=1)
+        if self.device_cpu_flag:
+            text_masks = torch.cat([ops.zeros_var_cpu([batch_size, 1]), text_masks.float()], dim=1)
+        else :
+            text_masks = torch.cat([ops.zeros_var_cuda([batch_size, 1]), text_masks.float()], dim=1)
         text_embedded = inputs_embedded[:, :text_masks.size(1), :]
         output = self.translatability_pred(text_embedded[:, 0, :])
         span_extractor_output = self.span_extractor(text_embedded, text_masks)
@@ -85,8 +96,8 @@ class TranslatabilityChecker(nn.Module):
         outputs, output_spans = [], []
         for batch_start_id in tqdm(range(0, len(dev_data), batch_size)):
             mini_batch = dev_data[batch_start_id: batch_start_id + batch_size]
-            _, text_masks = ops.pad_batch([exp.text_ids for exp in mini_batch], bu.pad_id)
-            encoder_input_ids = ops.pad_batch([exp.ptr_input_ids for exp in mini_batch], bu.pad_id)
+            _, text_masks = ops.pad_batch([exp.text_ids for exp in mini_batch], bu.pad_id, device_cpu_flag=self.device_cpu_flag)
+            encoder_input_ids = ops.pad_batch([exp.ptr_input_ids for exp in mini_batch], bu.pad_id, device_cpu_flag=self.device_cpu_flag)
             # [batch_size, 2, encoder_seq_len]
             output, span_extract_output = self.forward(encoder_input_ids, text_masks)
             outputs.append(output)
@@ -96,7 +107,10 @@ class TranslatabilityChecker(nn.Module):
             end_logit = span_extract_output[:, 1, :]
             # [batch_size, encoder_seq_len, encoder_seq_len]
             span_logit = start_logit.unsqueeze(2) + end_logit.unsqueeze(1)
-            valid_span_pos = ops.ones_var_cuda([len(span_logit), encoder_seq_len, encoder_seq_len]).triu()
+            if self.device_cpu_flag:
+                valid_span_pos = ops.ones_var_cpu([len(span_logit), encoder_seq_len, encoder_seq_len]).triu()
+            else :
+                valid_span_pos = ops.ones_var_cuda([len(span_logit), encoder_seq_len, encoder_seq_len]).triu()
             span_logit = span_logit - (1 - valid_span_pos) * ops.HUGE_INT
 
             for i in range(len(mini_batch)):
@@ -108,7 +122,10 @@ class TranslatabilityChecker(nn.Module):
 
     def get_segment_and_position_ids(self, encoder_input_ids):
         batch_size, input_size = encoder_input_ids.size()
-        position_ids = ops.arange_cuda(input_size).unsqueeze(0).expand_as(encoder_input_ids)
+        if self.device_cpu_flag:
+            position_ids = ops.arange_cpu(input_size).unsqueeze(0).expand_as(encoder_input_ids)
+        else :
+            position_ids = ops.arange_cuda(input_size).unsqueeze(0).expand_as(encoder_input_ids)
         # [CLS] t1 t2 ... [SEP] ...
         # 0     0  0  ...  0    ...
         seg1_sizes = torch.nonzero(encoder_input_ids == bu.sep_id)[:, 1].view(batch_size, 2)[:, 0] + 1
@@ -117,10 +134,10 @@ class TranslatabilityChecker(nn.Module):
         position_ids = None
         return segment_ids, position_ids
 
-    def load_checkpoint(self, in_tar):
+    def load_checkpoint(self, in_tar, device = 'cpu'):
         if os.path.isfile(in_tar):
             print('=> loading checkpoint \'{}\''.format(in_tar))
-            checkpoint = torch.load(in_tar)
+            checkpoint = torch.load(in_tar, map_location = device)
             self.load_state_dict(checkpoint['model_state_dict'])
         else:
             print('=> no checkpoint found at \'{}\''.format(in_tar))
@@ -161,11 +178,11 @@ def train(train_data, dev_data):
         os.mkdir(model_dir)
 
     trans_checker = TranslatabilityChecker(args)
-    trans_checker.cuda()
+    
     ops.initialize_module(trans_checker, 'xavier')
 
-    wandb.init(project='translatability-prediction', name=get_wandb_tag(args))
-    wandb.watch(trans_checker)
+#     wandb.init(project='translatability-prediction', name=get_wandb_tag(args))
+#     wandb.watch(trans_checker)
 
     # Hyperparameters
     batch_size = min(len(train_data), 12)
@@ -195,8 +212,8 @@ def train(train_data, dev_data):
         epoch_losses = []
 
         for i in tqdm(range(0, len(train_data), batch_size)):
-            wandb.log({'learning_rate/{}'.format(args.dataset_name): optimizer.param_groups[0]['lr']})
-            wandb.log({'fine_tuning_rate/{}'.format(args.dataset_name): optimizer.param_groups[1]['lr']})
+#             wandb.log({'learning_rate/{}'.format(args.dataset_name): optimizer.param_groups[0]['lr']})
+#             wandb.log({'fine_tuning_rate/{}'.format(args.dataset_name): optimizer.param_groups[1]['lr']})
             mini_batch = train_data[i : i + batch_size]
             _, text_masks = ops.pad_batch([exp.text_ids for exp in mini_batch], bu.pad_id)
             encoder_input_ids = ops.pad_batch([exp.ptr_input_ids for exp in mini_batch], bu.pad_id)
@@ -221,7 +238,7 @@ def train(train_data, dev_data):
             if args.num_epochs % num_peek_epochs == 0:
                 stdout_msg = 'Epoch {}: average training loss = {}'.format(epoch_id, np.mean(epoch_losses))
                 print(stdout_msg)
-                wandb.log({'cross_entropy_loss/{}'.format(args.dataset_name): np.mean(epoch_losses)})
+#                 wandb.log({'cross_entropy_loss/{}'.format(args.dataset_name): np.mean(epoch_losses)})
                 pred_trans, pred_spans = trans_checker.inference(dev_data)
                 targets = [1 if exp.span_ids[0] == 0 else 0 for exp in dev_data]
                 target_spans = [exp.span_ids for exp in dev_data]
@@ -236,9 +253,9 @@ def train(train_data, dev_data):
                 print('Dev span precision = {}'.format(prec))
                 print('Dev span recall = {}'.format(recall))
                 print('Dev span F1 = {}'.format(f1))
-                wandb.log({'translatability_accuracy/{}'.format(args.dataset_name): trans_acc})
-                wandb.log({'span_accuracy/{}'.format(args.dataset_name): span_acc})
-                wandb.log({'span_f1/{}'.format(args.dataset_name): f1})
+#                 wandb.log({'translatability_accuracy/{}'.format(args.dataset_name): trans_acc})
+#                 wandb.log({'span_accuracy/{}'.format(args.dataset_name): span_acc})
+#                 wandb.log({'span_f1/{}'.format(args.dataset_name): f1})
 
 
 def run_inference():
@@ -251,8 +268,12 @@ def run_inference():
         os.mkdir(model_dir)
     model_path = os.path.join(model_dir, 'model-best.tar')
     trans_checker = TranslatabilityChecker(args)
-    trans_checker.load_checkpoint(model_path)
-    trans_checker.cuda()
+    if args.gpu:
+        trans_checker.load_checkpoint(model_path, device='cuda:0')
+        trans_checker.cuda()
+    else:
+        trans_checker.load_checkpoint(model_path, device='cpu')
+        trans_checker.cpu()
     trans_checker.eval()
 
     with torch.no_grad():

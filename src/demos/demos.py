@@ -30,8 +30,12 @@ def load_semantic_parser(args):
         sp = EncoderDecoderLFramework(args)
     else:
         raise NotImplementedError
-    sp.load_checkpoint(get_checkpoint_path(args))
-    sp.cuda()
+    if args.gpu:
+        sp.load_checkpoint(get_checkpoint_path(args), device='cuda:0')
+        sp.cuda()
+    else :
+        sp.load_checkpoint(get_checkpoint_path(args), device='cpu')
+        sp.cpu()
     sp.eval()
     return sp
 
@@ -39,11 +43,16 @@ def load_semantic_parser(args):
 def load_confusion_span_detector(args):
     tc = TranslatabilityChecker(args)
     if args.checkpoint_path is not None:
-        tc.load_checkpoint(args.checkpoint_path)
+        if args.gpu:
+            tc.load_checkpoint(args.checkpoint_path, device='cuda:0')
+            tc.cuda()
+        else :
+            tc.load_checkpoint(args.checkpoint_path, device='cpu')
+            tc.cpu()
     else:
         print('Warning: translatability checker checkpoint not specified')
         return None
-    tc.cuda()
+    
     tc.eval()
     return tc
 
@@ -95,6 +104,11 @@ class Text2SQLWrapper(object):
         else:
             self.pred_restored_cache = None
 
+        if args.gpu :
+            self.device_cpu_flag = False
+        else : 
+            self.device_cpu_flag = True
+
     def confusion_span_detection(self, example):
         text_tokens = example.text_tokens
         trans_pred, confusion_span = self.confusion_span_detector.inference([example])
@@ -121,7 +135,7 @@ class Text2SQLWrapper(object):
         start_time = time.time()
         output = self.semantic_parsers[0].inference([example], restore_clause_order=self.args.process_sql_in_execution_order,
                                                     pred_restored_cache=self.pred_restored_cache,
-                                                    model_ensemble=self.model_ensemble, verbose=False)
+                                                    model_ensemble=self.model_ensemble, verbose=False,device_cpu_flag=self.device_cpu_flag)
         if len(output['pred_decoded'][0]) > 1:
             pred_sql = output['pred_decoded'][0][0]
         else:

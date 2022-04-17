@@ -38,6 +38,11 @@ class Bridge(PointerGenerator):
         super().__init__(args, in_vocab, out_vocab)
         self.model_id = BRIDGE
 
+        # cpu 사용 여부 추가
+        self.device_cpu_flag = True if not args.gpu else False
+        if self.device_cpu_flag:
+            torch.device('cpu')
+
     def forward(self, encoder_ptr_input_ids, encoder_ptr_value_ids, text_masks, schema_masks, feature_ids,
                 transformer_output_value_masks=None, schema_memory_masks=None, decoder_input_ids=None,
                 decoder_ptr_value_ids=None):
@@ -97,7 +102,8 @@ class Bridge(PointerGenerator):
                                        encoder_ptr_value_ids=encoder_ptr_value_ids,
                                        schema_memory_masks=schema_memory_masks,
                                        db_scope=db_scope,
-                                       no_from=(self.dataset_name == 'wikisql'))
+                                       no_from=(self.dataset_name == 'wikisql'),
+                                       device_cpu_flag=self.device_cpu_flag)
                 else:
                     raise NotImplementedError
 
@@ -119,7 +125,8 @@ class Bridge(PointerGenerator):
                                                      self.ff_dropouts,
                                                      self.use_lstm_encoder,
                                                      self.use_meta_data_encoding,
-                                                     self.use_graph_encoding)
+                                                     self.use_graph_encoding,
+                                                     device_cpu=self.device_cpu_flag)
         self.decoder = BridgeDecoder(self.decoder_input_dim,
                                      self.decoder_hidden_dim,
                                      self.num_rnn_layers,
@@ -130,7 +137,8 @@ class Bridge(PointerGenerator):
                                      [(self.decoder_hidden_dim,
                                        self.encoder_hidden_dim,
                                        self.cross_attn_num_heads,
-                                       self.attn_dropout)])
+                                       self.attn_dropout)],
+                                     self.device_cpu_flag)
 
 
 class SchemaEncoder(nn.Module):
@@ -184,8 +192,11 @@ class SchemaAwareTransformerEncoder(nn.Module):
     """
     def __init__(self, in_vocab, out_vocab, input_dim, hidden_dim, decoder_hidden_dim, num_layers,
                  num_const_attn_layers, rnn_layer_dropout, rnn_weight_dropout, feat_emb_dropout, res_dropout,
-                 ff_dropouts, use_lstm_encoder=False, use_meta_data_encoding=False, use_graph_encoding=False):
+                 ff_dropouts, use_lstm_encoder=False, use_meta_data_encoding=False, use_graph_encoding=False, device_cpu=None):
         super().__init__()
+        self.device_cpu_flag = True if device_cpu else False
+        if self.device_cpu_flag:
+            torch.device('cpu')
         self.in_vocab = in_vocab
         self.out_vocab = out_vocab
         self.input_dim = input_dim
@@ -208,6 +219,7 @@ class SchemaAwareTransformerEncoder(nn.Module):
         if self.use_meta_data_encoding:
             self.schema_encoder = SchemaEncoder(self.hidden_dim, self.hidden_dim, feat_emb_dropout, res_dropout,
                                                 ff_dropouts, use_graph_encoding=use_graph_encoding)
+        
 
     def forward(self, inputs_embedded, input_masks, text_masks, schema_masks, feature_ids,
                 transformer_output_value_masks=None, return_separate_hiddens=False):
@@ -244,10 +256,10 @@ class SchemaAwareTransformerEncoder(nn.Module):
             hidden = (hidden[0].contiguous(), hidden[1].contiguous())
 
         if transformer_output_value_masks is not None:
-            values_embedded, values_masks = ops.batch_binary_lookup_3D(
-                encoder_base_hiddens, transformer_output_value_masks, pad_value=0)
+            values_embedded, values_masks = ops.batch_binary_lookup_3D(encoder_base_hiddens, transformer_output_value_masks, pad_value=0,device_cpu_flag=self.device_cpu_flag)
             constant_hiddens, constant_hidden_masks = ops.merge_padded_seq_3D(
-                text_hiddens, text_masks, values_embedded, values_masks)
+                    text_hiddens, text_masks, values_embedded, values_masks, device_cpu_flag=self.device_cpu_flag)
+
             if self.num_const_attn_layers > 0:
                 for i in range(self.num_const_attn_layers):
                     constant_hiddens, _ = self.constant_encoder(constant_hiddens, constant_hidden_masks)
@@ -258,7 +270,7 @@ class SchemaAwareTransformerEncoder(nn.Module):
         # -- Schema Encoder
         # [batch_size, schema_size]
         schema_hiddens, schema_hidden_masks = ops.batch_binary_lookup_3D(
-            encoder_base_hiddens, schema_masks, pad_value=0)
+            encoder_base_hiddens, schema_masks, pad_value=0,device_cpu_flag=self.device_cpu_flag)
         if self.use_meta_data_encoding:
             schema_hiddens = self.schema_encoder(schema_hiddens, feature_ids)
 
@@ -267,7 +279,7 @@ class SchemaAwareTransformerEncoder(nn.Module):
         else:
             # -- Merge text and schema encodings
             encoder_hiddens, encoder_hidden_masks = ops.merge_padded_seq_3D(
-                constant_hiddens, constant_hidden_masks, schema_hiddens, schema_hidden_masks)
+                    constant_hiddens, constant_hidden_masks, schema_hiddens, schema_hidden_masks,device_cpu_flag=self.device_cpu_flag)
             return encoder_hiddens, encoder_hidden_masks, constant_hidden_masks, schema_hidden_masks, hidden
 
 
@@ -282,12 +294,13 @@ class BridgeDecoder(RNNDecoder):
     """
 
     def __init__(self, input_dim, hidden_dim, num_layers, vocab, rnn_layer_dropout, rnn_weight_dropout,
-                 ff_dropouts, attn_params):
+                 ff_dropouts, attn_params, device_cpu_flag):
         super().__init__(input_dim, hidden_dim, num_layers, vocab, rnn_layer_dropout, rnn_weight_dropout,
                          ff_dropouts, attn_params)
         query_dim = attn_params[0][0]
         context_dim = sum([v_dim for _, v_dim, _, _ in attn_params])
         self.pointer_switch = PointerSwitch(query_dim=query_dim, key_dim=context_dim, input_dropout=ff_dropouts[0])
+        self.device_cpu_flag = device_cpu_flag
 
     def forward(self, input_embedded, hidden, encoder_hiddens, encoder_hidden_masks, pointer_context=None,
                 vocab_masks=None, memory_masks=None, encoder_ptr_value_ids=None, decoder_ptr_value_ids=None,
@@ -326,8 +339,12 @@ class BridgeDecoder(RNNDecoder):
         if pointer_context:
             p_pointer, attn_weights = pointer_context
         else:
-            p_pointer = ops.zeros_var_cuda([batch_size, 1, 1])
-            attn_weights = ops.zeros_var_cuda([batch_size, self.attn.num_heads, 1, encoder_hiddens.size(1)])
+            if self.device_cpu_flag:
+                p_pointer = ops.zeros_var_cpu([batch_size, 1, 1])
+                attn_weights = ops.zeros_var_cpu([batch_size, self.attn.num_heads, 1, encoder_hiddens.size(1)])
+            else:
+                p_pointer = ops.zeros_var_cuda([batch_size, 1, 1])
+                attn_weights = ops.zeros_var_cuda([batch_size, self.attn.num_heads, 1, encoder_hiddens.size(1)])
 
         outputs, hiddens = [], []
         seq_attn_weights = []
@@ -378,7 +395,10 @@ class BridgeDecoder(RNNDecoder):
             if encoder_ptr_value_ids is None:
                 point_gen_prob = torch.cat([(1 - p_pointer) * gen_prob, weighted_point_prob], dim=2)
             else:
-                gen_prob_zeros_pad = ops.zeros_var_cuda((batch_size, 1, encoder_hiddens.size(1)))
+                if self.device_cpu_flag:
+                    gen_prob_zeros_pad = ops.zeros_var_cpu((batch_size, 1, encoder_hiddens.size(1)))
+                else:
+                    gen_prob_zeros_pad = ops.zeros_var_cuda((batch_size, 1, encoder_hiddens.size(1)))
                 weighted_gen_prob = torch.cat([(1 - p_pointer) * gen_prob, gen_prob_zeros_pad], dim=2)
                 point_gen_prob = weighted_gen_prob.scatter_add_(index=encoder_ptr_value_ids.unsqueeze(1),
                                                                 src=weighted_point_prob, dim=2)

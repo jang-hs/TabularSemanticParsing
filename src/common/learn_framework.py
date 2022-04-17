@@ -406,7 +406,26 @@ class LFramework(nn.Module):
                 o_f.write('{}\n'.format(pred_sql[0]))
             print('=> Model predictions saved to {}'.format(out_txt))
 
-    def load_checkpoint(self, input_file):
+    # def load_checkpoint(self, input_file):
+    #     """
+    #     Load model checkpoint.
+    #     :param n: Neural network module.
+    #     :param kg: Knowledge graph module.
+    #     :param input_file: Checkpoint file path.
+    #     """
+    #     if os.path.isfile(input_file):
+    #         print('=> loading checkpoint \'{}\''.format(input_file))
+    #         checkpoint = torch.load(input_file)
+    #         self.load_state_dict(checkpoint['model_state_dict'])
+    #         if self.args.train:
+    #             self.start_step = checkpoint['interval_step_id'] + 1
+    #             if 'optimizer_state_dict' in checkpoint:
+    #                 self.optim.load_state_dict(checkpoint['optimizer_state_dict'])
+    #             if 'lr_scheduler_dict' in checkpoint:
+    #                 self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_dict'])
+    #     else:
+    #         print('=> no checkpoint found at \'{}\''.format(input_file))
+    def load_checkpoint(self, input_file, device):
         """
         Load model checkpoint.
         :param n: Neural network module.
@@ -415,7 +434,7 @@ class LFramework(nn.Module):
         """
         if os.path.isfile(input_file):
             print('=> loading checkpoint \'{}\''.format(input_file))
-            checkpoint = torch.load(input_file)
+            checkpoint = torch.load(input_file, map_location = device)
             self.load_state_dict(checkpoint['model_state_dict'])
             if self.args.train:
                 self.start_step = checkpoint['interval_step_id'] + 1
@@ -425,7 +444,6 @@ class LFramework(nn.Module):
                     self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_dict'])
         else:
             print('=> no checkpoint found at \'{}\''.format(input_file))
-
     # --- Train flow control functions --- #
 
     def log_in_wandb(self, step_id):
